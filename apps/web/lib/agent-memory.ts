@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { containsBlockedLanguage, redactBlockedLanguage } from "./content-filter";
 
 /**
  * Server-only, read-only client for Redis Agent Memory, used by the memory
@@ -108,12 +109,14 @@ function asRecall(value: unknown): RecallRecord | undefined {
   const record = value as Partial<RecallRecord>;
   if (!Array.isArray(record.memories)) return undefined;
   return {
-    query: String(record.query ?? ""),
+    query: redactBlockedLanguage(String(record.query ?? "")),
     topK: Number(record.topK ?? 0),
     status: record.status === "error" ? "error" : "ok",
     memories: record.memories.filter(
       (memory): memory is RecalledMemory =>
-        typeof memory?.memoryId === "string" && typeof memory?.text === "string",
+        typeof memory?.memoryId === "string" &&
+        typeof memory?.text === "string" &&
+        !containsBlockedLanguage(memory.text),
     ),
   };
 }
@@ -164,26 +167,32 @@ export async function readMemorySnapshot(eveSessionId?: string): Promise<MemoryS
             ),
           }
         : undefined,
-      memories: (search?.items ?? []).map((item) => ({
-        memoryId: String(item.memoryId),
-        text: String(item.text ?? ""),
-        memoryType: String(item.memoryType ?? "semantic"),
-        topics: Array.isArray(item.topics) ? item.topics.map(String) : [],
-        sessionId: typeof item.sessionId === "string" ? item.sessionId : undefined,
-        createdAt: typeof item.createdAt === "string" ? item.createdAt : undefined,
-        updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : undefined,
-      })),
+      // This panel is public: hide any memory with blocked language, even one
+      // stored before the filter existed.
+      memories: (search?.items ?? [])
+        .map((item) => ({
+          memoryId: String(item.memoryId),
+          text: String(item.text ?? ""),
+          memoryType: String(item.memoryType ?? "semantic"),
+          topics: Array.isArray(item.topics) ? item.topics.map(String) : [],
+          sessionId: typeof item.sessionId === "string" ? item.sessionId : undefined,
+          createdAt: typeof item.createdAt === "string" ? item.createdAt : undefined,
+          updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : undefined,
+        }))
+        .filter((memory) => !containsBlockedLanguage([memory.text, ...memory.topics].join("\n"))),
       session:
         eveSessionId === undefined
           ? undefined
           : {
               sessionId: redisSessionIdFor(eveSessionId),
-              summary: session?.summary?.text || undefined,
+              summary: session?.summary?.text
+                ? redactBlockedLanguage(session.summary.text)
+                : undefined,
               events: (session?.events ?? []).map((event) => ({
                 eventId: event.eventId,
                 role: event.role,
                 actorId: event.actorId,
-                text: joinText(event.content),
+                text: redactBlockedLanguage(joinText(event.content)),
                 createdAt: event.createdAt,
                 recall: asRecall(event.metadata?.recall),
               })),

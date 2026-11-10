@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { defineMemoryProvider, type MemoryOperationContext, type MemoryToolSet } from "eve/memory";
 import { defineTool } from "eve/tools";
 import { z } from "zod";
+import { containsBlockedLanguage, redactBlockedLanguage } from "./content-filter";
 
 /**
  * eve memory provider backed by Redis Agent Memory (Redis Cloud / Redis Iris).
@@ -251,7 +252,10 @@ export function redisAgentMemory(options: RedisAgentMemoryOptions = {}) {
         let items: LongTermMemory[] = [];
         let status: RecallRecord["status"] = "ok";
         try {
-          items = await client.search(ownerId, query, cfg.topK, ctx.abortSignal);
+          // Never hand blocked language to the model, even if it was stored earlier.
+          items = (await client.search(ownerId, query, cfg.topK, ctx.abortSignal)).filter(
+            (item) => !containsBlockedLanguage(item.text),
+          );
         } catch (error) {
           if (isAbort(error, ctx.abortSignal) || !cfg.failOpen) throw error;
           status = "error";
@@ -260,9 +264,11 @@ export function redisAgentMemory(options: RedisAgentMemoryOptions = {}) {
 
         // Record the user's message in session memory together with what recall
         // returned, so the conversation history in Redis shows what the model saw.
+        // Blocked language is redacted first so automatic extraction never sees it.
         if (cfg.captureTurns) {
+          const safeQuery = redactBlockedLanguage(query);
           const recall: RecallRecord = {
-            query: query.slice(0, MAX_QUERY_CHARS),
+            query: safeQuery.slice(0, MAX_QUERY_CHARS),
             topK: cfg.topK,
             status,
             memories: items.map(({ memoryId, text, memoryType, topics }) => ({
@@ -278,7 +284,7 @@ export function redisAgentMemory(options: RedisAgentMemoryOptions = {}) {
               {
                 actorId: ownerId,
                 role: "USER",
-                text: query,
+                text: safeQuery,
                 idempotencyKey: digest(ctx.operationId, "user"),
                 metadata: { source: "eve", eveTurnId: ctx.turn.id, recall },
               },
@@ -305,7 +311,9 @@ export function redisAgentMemory(options: RedisAgentMemoryOptions = {}) {
         const cfg = config();
         if (!cfg || !cfg.captureTurns) return;
         const lastAssistant = [...ctx.messages].reverse().find((m) => m.role === "assistant");
-        const assistantText = lastAssistant ? textOf(lastAssistant).trim() : "";
+        const assistantText = lastAssistant
+          ? redactBlockedLanguage(textOf(lastAssistant).trim())
+          : "";
         if (!assistantText) return;
         const ownerId = ownerOf(ctx.memory.scope.key);
         await createClient(cfg).appendEvent(
@@ -339,7 +347,9 @@ export function redisAgentMemory(options: RedisAgentMemoryOptions = {}) {
           async execute({ query, limit }, { abortSignal }) {
             const items = await client.search(ownerId, query, limit ?? 10, abortSignal);
             return {
-              memories: items.map(({ memoryId, text, topics }) => ({ memoryId, text, topics })),
+              memories: items
+                .filter((item) => !containsBlockedLanguage(item.text))
+                .map(({ memoryId, text, topics }) => ({ memoryId, text, topics })),
             };
           },
         }),
@@ -352,6 +362,13 @@ export function redisAgentMemory(options: RedisAgentMemoryOptions = {}) {
             topics: z.array(z.string().min(1).max(64)).max(10).optional(),
           }),
           async execute({ text, topics }, { abortSignal }) {
+            if (containsBlockedLanguage([text, ...(topics ?? [])].join("\n"))) {
+              return {
+                saved: false,
+                reason:
+                  "Blocked by the content filter: memories can't contain profanity or slurs. Rephrase without them, or don't save this.",
+              };
+            }
             const memoryId = await client.create(ownerId, text.trim(), topics ?? [], abortSignal);
             return { saved: true, memoryId };
           },
