@@ -1,6 +1,6 @@
 import { defineAgent } from "eve";
 
 export default defineAgent({
-  model: "openai/gpt-6-luna-fast",
-  reasoning: "high",
+  model: "deepseek/deepseek-v4-flash",
+  reasoning: "low",
 });

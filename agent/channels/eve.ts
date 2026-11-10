@@ -1,15 +1,13 @@
 import { eveChannel } from "eve/channels/eve";
-import { localDev, placeholderAuth, vercelOidc } from "eve/channels/auth";
+import { localDev, none } from "eve/channels/auth";
 
 export default eveChannel({
   auth: [
-    // Lets the eve TUI and your Vercel deployments reach the deployed agent.
-    vercelOidc(),
-    // Open on localhost for `eve dev` and the REPL; ignored in production.
+    // Local dev servers only. Keeps the self-modification subagent available,
+    // since eve offers it only to localDev() sessions.
     localDev(),
-    // This placeholder will not allow browser requests in production.
-    // Replace it with your app's auth provider, like Auth.js or Clerk,
-    // or use none() for a public demo.
-    placeholderAuth(),
+    // Public single-user showcase: anyone can chat. Add rate limiting or an
+    // API key before exposing this broadly.
+    none(),
   ],
 });
